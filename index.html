@@ -1,84 +1,63 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Book ISBN Scanner</title>
-    <script src="https://unpkg.com/@zxing/library@latest"></script>
-    <style>
-        body { font-family: sans-serif; text-align: center; padding: 20px; }
-        #video { width: 100%; max-width: 500px; border: 1px solid #ccc; border-radius: 8px; }
-        #status { margin-top: 15px; font-weight: bold; color: #333; }
-    </style>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://unpkg.com/@zxing/library@latest"></script>
 </head>
+
 <body>
+<h2>Scan Book ISBN</h2>
+<video id="video" width="100%" autoplay></video>
+<p id="status">Starting camera...</p>
 
-    <h2>Scan Book ISBN</h2>
-    <video id="video" autoplay muted playsinline></video>
-    <p id="status">Starting camera...</p>
+<script>
+const codeReader = new ZXing.BrowserBarcodeReader();
+const sheetURL = "PASTE_YOUR_WEBAPP_URL_HERE";
 
-    <script>
-        const codeReader = new ZXing.BrowserBarcodeReader();
-        // REMEMBER: Replace this with your actual Google Apps Script Web App URL
-        const sheetURL = "PASTE_YOUR_WEBAPP_URL_HERE"; 
+let lastScan = "";
 
-        let lastScan = "";
+async function lookupBook(isbn) {
+  const res = await fetch(
+    `https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&format=json&jscmd=data`
+  );
+  const data = await res.json();
 
-        async function lookupBook(isbn) {
-            try {
-                const res = await fetch(`https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&format=json&jscmd=data`);
-                const data = await res.json();
-                const book = data["ISBN:" + isbn];
-                if (!book) return null;
+  const book = data["ISBN:"+isbn];
+  if (!book) return null;
 
-                return {
-                    title: book.title || "Unknown Title",
-                    author: (book.authors || []).map(a => a.name).join(", ")
-                };
-            } catch (err) {
-                console.error("Lookup failed", err);
-                return null;
-            }
-        }
+  return {
+    title: book.title || "",
+    author: (book.authors||[]).map(a=>a.name).join(", ")
+  };
+}
 
-        codeReader.decodeFromVideoDevice(null, 'video', async (result, err) => {
-            if (result) {
-                const isbn = result.text;
+codeReader.decodeFromVideoDevice(null, 'video', async (result, err) => {
+  if (result) {
+    const isbn = result.text;
 
-                if (isbn === lastScan) return;
-                lastScan = isbn;
+    if (isbn === lastScan) return;
+    lastScan = isbn;
 
-                document.getElementById("status").innerText = "Looking up " + isbn;
+    document.getElementById("status").innerText =
+      "Looking up " + isbn;
 
-                const book = await lookupBook(isbn);
-                if (!book) {
-                    document.getElementById("status").innerText = "Book not found for " + isbn;
-                    return;
-                }
+    const book = await lookupBook(isbn);
+    if (!book) return;
 
-                // Sending to your Sheet
-                try {
-                    await fetch(sheetURL, {
-                        method: "POST",
-                        mode: "no-cors", // Required for Google Apps Script POSTs
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            isbn: isbn,
-                            title: book.title,
-                            author: book.author
-                        })
-                    });
+    await fetch(sheetURL, {
+      method: "POST",
+      body: JSON.stringify({
+        isbn: isbn,
+        title: book.title,
+        author: book.author
+      })
+    });
 
-                    if (navigator.vibrate) navigator.vibrate(200);
-                    document.getElementById("status").innerText = "Added: " + book.title;
-                } catch (postErr) {
-                    document.getElementById("status").innerText = "Error saving to sheet.";
-                }
-            }
-            if (err && !(err instanceof ZXing.NotFoundException)) {
-                console.error(err);
-            }
-        });
-    </script>
+    navigator.vibrate?.(200);
+    document.getElementById("status").innerText =
+      "Added: " + book.title;
+  }
+});
+</script>
 </body>
 </html>
