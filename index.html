@@ -2,62 +2,85 @@
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Book Scanner</title>
+
 <script src="https://unpkg.com/@zxing/library@latest"></script>
+
+<style>
+body {
+  margin:0;
+  font-family:sans-serif;
+  background:black;
+  color:white;
+  text-align:center;
+}
+
+video {
+  width:100%;
+  height:auto;
+}
+
+#overlay {
+  position:absolute;
+  top:35%;
+  left:10%;
+  width:80%;
+  height:18%;
+  border:4px solid lime;
+  border-radius:12px;
+  pointer-events:none;
+}
+
+#status {
+  padding:10px;
+  font-size:18px;
+}
+
+button {
+  margin:5px;
+  padding:10px;
+  font-size:16px;
+}
+</style>
 </head>
 
 <body>
-<h2>Scan Book ISBN</h2>
-<video id="video" width="100%" autoplay></video>
-<p id="status">Starting camera...</p>
+
+<h3>ISBN Scanner</h3>
+
+<div style="position:relative;">
+  <video id="video" autoplay playsinline muted></video>
+  <div id="overlay"></div>
+</div>
+
+<div id="status">Starting camera…</div>
+
+<div>
+  Shelf:
+  <button onclick="setShelf('Office')">Office</button>
+  <button onclick="setShelf('Living Room')">Living</button>
+  <button onclick="setShelf('Storage')">Storage</button>
+</div>
 
 <script>
-const codeReader = new ZXing.BrowserBarcodeReader();
+/* ==============================
+   CONFIG
+============================== */
+
 const sheetURL = "https://script.google.com/macros/s/AKfycbyoZySH85-MXYKXySBDGsCg1PyxTp6LpIfptTB4HeLr6D7a__Z1jGrsQ8lVH8UTn0Hn/exec";
+const SCAN_DELAY = 1500;
 
+/* ==============================
+   STATE
+============================== */
+
+const codeReader = new ZXing.BrowserBarcodeReader();
+
+let lastScanTime = 0;
 let lastScan = "";
+let currentShelf = "Unsorted";
 
-async function lookupBook(isbn) {
-  const res = await fetch(
-    `https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&format=json&jscmd=data`
-  );
-  const data = await res.json();
+const scannedISBNs = new Set();
+const metadataCache = {};
 
-  const book = data["ISBN:"+isbn];
-  if (!book) return null;
-
-  return {
-    title: book.title || "",
-    author: (book.authors||[]).map(a=>a.name).join(", ")
-  };
-}
-
-codeReader.decodeFromVideoDevice(null, 'video', async (result, err) => {
-  if (result) {
-    const isbn = result.text;
-
-    if (isbn === lastScan) return;
-    lastScan = isbn;
-
-    document.getElementById("status").innerText =
-      "Looking up " + isbn;
-
-    const book = await lookupBook(isbn);
-    if (!book) return;
-
-    await fetch(sheetURL, {
-      method: "POST",
-      body: JSON.stringify({
-        isbn: isbn,
-        title: book.title,
-        author: book.author
-      })
-    });
-
-    navigator.vibrate?.(200);
-    document.getElementById("status").innerText =
-      "Added: " + book.title;
-  }
-});
-</script>
-</body>
-</html>
+/* ======================*
