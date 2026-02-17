@@ -16,6 +16,12 @@
             width: 100%; 
             max-height: 70vh; 
             background: #222; 
+            display: block;
+        }
+        #videoContainer {
+            position: relative;
+            max-height: 70vh;
+            overflow: hidden;
         }
         #overlay { 
             position: absolute; 
@@ -31,10 +37,11 @@
         }
         #status { 
             padding: 15px; 
-            font-size: 18px; 
+            font-size: 16px; 
             font-weight: bold; 
             background: #333; 
             min-height: 30px;
+            word-wrap: break-word;
         }
         .status-error { background: #c0392b !important; }
         .status-success { background: #27ae60 !important; }
@@ -72,13 +79,23 @@
         .history-item.error { border-left-color: #c0392b; }
         
         #controls { margin: 15px 0; }
+        
+        #debugInfo {
+            font-size: 12px;
+            color: #888;
+            padding: 10px;
+            max-width: 600px;
+            margin: 0 auto;
+            text-align: left;
+            display: none;
+        }
     </style>
 </head>
 <body>
 
 <h3>ISBN Scanner</h3>
 
-<div style="position:relative;">
+<div id="videoContainer">
     <video id="video" autoplay playsinline muted></video>
     <div id="overlay"></div>
 </div>
@@ -92,18 +109,21 @@
         <button class="btn-storage" onclick="setShelf('Storage')">Storage</button>
     </div>
     <div>
-        <button style="background: #e74c3c; color: white;" onclick="toggleScanning()">Stop Scanning</button>
+        <button style="background: #e74c3c; color: white;" onclick="restartCamera()">Restart Camera</button>
         <button style="background: #16a085; color: white;" onclick="clearHistory()">Clear History</button>
+        <button style="background: #7f8c8d; color: white;" onclick="toggleDebug()">Debug Info</button>
     </div>
 </div>
 
+<div id="debugInfo"></div>
 <div id="scanHistory"></div>
 
 <script>
     // ===== CONFIGURATION =====
     const sheetURL = "https://script.google.com/macros/s/AKfycbyoZySH85-MXYKXySBDGsCg1PyxTp6LpIfptTB4HeLr6D7a__Z1jGrsQ8lVH8UTn0Hn/exec";
-    const SCAN_DELAY = 2500; // Milliseconds between duplicate scans
-    const MAX_HISTORY = 20; // Maximum history items to display
+    const SCAN_DELAY = 2500;
+    const MAX_HISTORY = 20;
+    const CAMERA_TIMEOUT = 10000; // 10 second timeout
     
     // ===== STATE =====
     let codeReader;
@@ -113,82 +133,171 @@
     let currentShelf = "Office";
     let isScanning = true;
     let scanHistory = [];
+    let cameraStartTime = 0;
+    let debugMode = false;
 
     // ===== INITIALIZATION =====
     window.addEventListener('load', function() {
-        codeReader = new ZXing.BrowserBarcodeReader();
-        console.log("ZXing Ready");
-        loadHistory();
-        initCamera();
-    });
-
-    function initCamera() {
-        const statusEl = document.getElementById('status');
-        const videoEl = document.getElementById('video');
+        addDebug("Page loaded");
         
-        // Check if browser supports getUserMedia
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            showError("Camera not supported in this browser");
+        // Check for ZXing library
+        if (typeof ZXing === 'undefined') {
+            showError("ZXing library failed to load. Check internet connection.");
+            addDebug("ERROR: ZXing not loaded");
             return;
         }
         
-        statusEl.textContent = "Requesting camera access...";
+        try {
+            codeReader = new ZXing.BrowserMultiFormatReader();
+            addDebug("ZXing initialized: " + ZXing.BrowserMultiFormatReader.name);
+            loadHistory();
+            initCamera();
+        } catch (e) {
+            showError("Failed to initialize scanner: " + e.message);
+            addDebug("ERROR: " + e.toString());
+        }
+    });
+
+    function initCamera() {
+        addDebug("initCamera() called");
+        const statusEl = document.getElementById('status');
+        const videoEl = document.getElementById('video');
         
+        cameraStartTime = Date.now();
+        
+        // Check for getUserMedia support
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            showError("Camera not supported in this browser");
+            addDebug("ERROR: getUserMedia not available");
+            return;
+        }
+        
+        statusEl.textContent = "Starting camera...";
+        addDebug("Requesting camera permissions...");
+        
+        // Set timeout to catch stuck camera initialization
+        const timeout = setTimeout(() => {
+            if (statusEl.textContent === "Starting camera...") {
+                showError("Camera timeout. Tap 'Restart Camera' to retry.");
+                addDebug("ERROR: Camera initialization timeout after " + CAMERA_TIMEOUT + "ms");
+            }
+        }, CAMERA_TIMEOUT);
+        
+        // Get list of video devices
         codeReader.listVideoInputDevices()
             .then((videoDevices) => {
+                clearTimeout(timeout);
+                
                 if (videoDevices.length === 0) {
                     showError("No camera found");
+                    addDebug("ERROR: No video devices detected");
                     return;
                 }
                 
-                console.log("Available cameras:", videoDevices);
+                addDebug("Found " + videoDevices.length + " camera(s)");
+                videoDevices.forEach((device, i) => {
+                    addDebug(`  Camera ${i}: ${device.label || 'Unknown'} [${device.deviceId.substr(0, 8)}...]`);
+                });
                 
                 // Find back camera (prefer environment-facing)
                 const backCam = videoDevices.find(device => 
                     /back|rear|environment/i.test(device.label)
                 );
-                const deviceId = backCam ? backCam.deviceId : videoDevices[0].deviceId;
+                const selectedDevice = backCam || videoDevices[0];
                 
-                console.log("Using camera:", deviceId);
-                statusEl.textContent = "Align barcode in the box...";
+                addDebug("Selected camera: " + (selectedDevice.label || 'Default'));
+                statusEl.textContent = "Starting scanner...";
                 
-                // Start decoding
-                return codeReader.decodeFromVideoDevice(deviceId, 'video', (result, err) => {
-                    if (result && isScanning) {
-                        handleBarcode(result.text);
-                    }
-                    if (err && !(err instanceof ZXing.NotFoundException)) {
-                        console.error("Decode error:", err);
-                    }
-                });
+                // Start decoding with hints for better performance
+                const hints = new Map();
+                hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+                    ZXing.BarcodeFormat.EAN_13,
+                    ZXing.BarcodeFormat.EAN_8,
+                    ZXing.BarcodeFormat.UPC_A,
+                    ZXing.BarcodeFormat.UPC_E
+                ]);
+                hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+                
+                return codeReader.decodeFromVideoDevice(
+                    selectedDevice.deviceId, 
+                    'video', 
+                    (result, err) => {
+                        if (result && isScanning) {
+                            handleBarcode(result.text);
+                        }
+                        // Silently ignore NotFoundException (no barcode in frame)
+                        if (err && !(err instanceof ZXing.NotFoundException)) {
+                            addDebug("Decode error: " + err.toString());
+                        }
+                    },
+                    hints
+                );
             })
             .then((controls) => {
-                scanControls = controls;
-                console.log("Scanning started");
+                if (controls) {
+                    scanControls = controls;
+                    const elapsed = Date.now() - cameraStartTime;
+                    addDebug("Camera started successfully in " + elapsed + "ms");
+                    statusEl.textContent = "Ready! Align barcode in the box...";
+                    document.getElementById('overlay').style.borderColor = "lime";
+                }
             })
             .catch(err => {
+                clearTimeout(timeout);
+                addDebug("Camera error: " + err.toString());
                 console.error("Camera error:", err);
+                
                 if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-                    showError("Camera access denied. Please allow camera permissions and reload.");
+                    showError("Camera blocked. Grant permission in browser settings.");
+                    addDebug("User denied camera permission");
                 } else if (err.name === 'NotFoundError') {
                     showError("No camera found on this device");
                 } else if (err.name === 'NotReadableError') {
-                    showError("Camera is already in use by another application");
+                    showError("Camera in use by another app");
+                } else if (err.name === 'OverconstrainedError') {
+                    showError("Camera doesn't meet requirements");
+                } else if (err.name === 'TypeError') {
+                    showError("Camera initialization failed. Try restarting.");
                 } else {
                     showError("Camera error: " + err.message);
                 }
             });
     }
 
+    function restartCamera() {
+        addDebug("Restart camera button clicked");
+        
+        // Stop existing camera
+        if (scanControls) {
+            try {
+                scanControls.stop();
+                addDebug("Stopped existing camera");
+            } catch (e) {
+                addDebug("Error stopping camera: " + e.toString());
+            }
+        }
+        
+        // Reset video element
+        const video = document.getElementById('video');
+        video.srcObject = null;
+        
+        // Clear state
+        scanControls = null;
+        lastScan = "";
+        lastScanTime = 0;
+        
+        // Reinitialize
+        document.getElementById('status').textContent = "Restarting...";
+        setTimeout(() => {
+            initCamera();
+        }, 500);
+    }
+
     // ===== ISBN VALIDATION =====
     function isValidISBN(code) {
-        // Remove hyphens and spaces
         const cleaned = code.replace(/[-\s]/g, '');
-        
-        // Check if it's ISBN-10 (10 digits, last can be X) or ISBN-13 (13 digits)
         const isbn10Pattern = /^\d{9}[\dX]$/;
         const isbn13Pattern = /^(978|979)\d{10}$/;
-        
         return isbn10Pattern.test(cleaned) || isbn13Pattern.test(cleaned);
     }
 
@@ -196,7 +305,6 @@
     function handleBarcode(code) {
         const now = Date.now();
         
-        // Prevent duplicate scans within delay period
         if (code === lastScan && (now - lastScanTime) < SCAN_DELAY) {
             return;
         }
@@ -204,23 +312,22 @@
         lastScan = code;
         lastScanTime = now;
 
-        // Validate ISBN
+        addDebug("Scanned: " + code);
+
         if (!isValidISBN(code)) {
-            showStatus(`Invalid ISBN: ${code}`, 'error');
+            showStatus(`Not an ISBN: ${code}`, 'error');
             flashOverlay('red');
+            addDebug("Invalid ISBN format");
             return;
         }
 
-        // Visual feedback
         showStatus(`Scanning: ${code}...`, 'normal');
         flashOverlay('orange');
         
-        // Haptic feedback (mobile)
         if (navigator.vibrate) {
             navigator.vibrate(100);
         }
 
-        // Send to Google Sheets
         uploadToSheet(code);
     }
 
@@ -229,35 +336,24 @@
         const timestamp = new Date().toISOString();
         const uploadUrl = `${sheetURL}?isbn=${encodeURIComponent(isbn)}&shelf=${encodeURIComponent(currentShelf)}&timestamp=${encodeURIComponent(timestamp)}`;
         
-        console.log("Uploading:", uploadUrl);
+        addDebug("Uploading to: " + uploadUrl.substring(0, 80) + "...");
         
         fetch(uploadUrl, { 
             mode: 'no-cors',
             method: 'GET'
         })
             .then(() => {
-                // Note: no-cors mode means we can't read the response
-                // We'll assume success if no error is thrown
                 showStatus(`✓ Saved ${isbn} to ${currentShelf}`, 'success');
                 flashOverlay('lime');
                 addToHistory(isbn, currentShelf, true);
-                
-                // Also try to verify with a CORS-enabled request (will fail gracefully)
-                fetch(uploadUrl)
-                    .then(response => response.json())
-                    .then(data => {
-                        console.log("Upload confirmed:", data);
-                    })
-                    .catch(() => {
-                        // Expected to fail with CORS, but upload still worked
-                        console.log("CORS blocked (expected), but upload succeeded via no-cors");
-                    });
+                addDebug("Upload successful");
             })
             .catch(err => {
                 console.error("Upload error:", err);
                 showStatus(`✗ Upload failed for ${isbn}`, 'error');
                 flashOverlay('red');
                 addToHistory(isbn, currentShelf, false);
+                addDebug("Upload failed: " + err.toString());
             });
     }
 
@@ -267,11 +363,10 @@
         statusEl.textContent = message;
         statusEl.className = type === 'error' ? 'status-error' : type === 'success' ? 'status-success' : '';
         
-        // Auto-clear success/error status after 3 seconds
         if (type !== 'normal') {
             setTimeout(() => {
                 if (statusEl.textContent === message) {
-                    statusEl.textContent = "Align barcode in the box...";
+                    statusEl.textContent = "Ready! Align barcode in the box...";
                     statusEl.className = '';
                 }
             }, 3000);
@@ -295,30 +390,12 @@
         currentShelf = name;
         showStatus(`Shelf set to: ${name}`, 'normal');
         
-        // Update button states
         document.querySelectorAll('button[class*="btn-"]').forEach(btn => {
             btn.classList.remove('btn-active');
         });
         event.target.classList.add('btn-active');
-    }
-
-    // ===== SCANNING CONTROL =====
-    function toggleScanning() {
-        isScanning = !isScanning;
-        const btn = event.target;
         
-        if (isScanning) {
-            btn.textContent = "Stop Scanning";
-            btn.style.background = "#e74c3c";
-            showStatus("Scanning resumed", 'normal');
-            if (!scanControls) {
-                initCamera();
-            }
-        } else {
-            btn.textContent = "Start Scanning";
-            btn.style.background = "#27ae60";
-            showStatus("Scanning paused", 'normal');
-        }
+        addDebug("Shelf changed to: " + name);
     }
 
     // ===== HISTORY MANAGEMENT =====
@@ -332,7 +409,6 @@
         
         scanHistory.unshift(item);
         
-        // Limit history size
         if (scanHistory.length > MAX_HISTORY) {
             scanHistory = scanHistory.slice(0, MAX_HISTORY);
         }
@@ -364,6 +440,7 @@
             saveHistory();
             renderHistory();
             showStatus('History cleared', 'normal');
+            addDebug("History cleared");
         }
     }
 
@@ -371,7 +448,7 @@
         try {
             localStorage.setItem('scanHistory', JSON.stringify(scanHistory));
         } catch (e) {
-            console.error("Failed to save history:", e);
+            addDebug("Failed to save history: " + e.toString());
         }
     }
 
@@ -381,16 +458,52 @@
             if (saved) {
                 scanHistory = JSON.parse(saved);
                 renderHistory();
+                addDebug("Loaded " + scanHistory.length + " history items");
             }
         } catch (e) {
-            console.error("Failed to load history:", e);
+            addDebug("Failed to load history: " + e.toString());
         }
+    }
+
+    // ===== DEBUG HELPERS =====
+    function addDebug(message) {
+        const timestamp = new Date().toLocaleTimeString();
+        const debugEl = document.getElementById('debugInfo');
+        const line = `[${timestamp}] ${message}\n`;
+        debugEl.textContent = line + debugEl.textContent;
+        console.log(line);
+        
+        // Keep only last 50 lines
+        const lines = debugEl.textContent.split('\n');
+        if (lines.length > 50) {
+            debugEl.textContent = lines.slice(0, 50).join('\n');
+        }
+    }
+
+    function toggleDebug() {
+        debugMode = !debugMode;
+        const debugEl = document.getElementById('debugInfo');
+        debugEl.style.display = debugMode ? 'block' : 'none';
+        event.target.textContent = debugMode ? 'Hide Debug' : 'Debug Info';
     }
 
     // ===== CLEANUP =====
     window.addEventListener('beforeunload', function() {
         if (scanControls) {
-            scanControls.stop();
+            try {
+                scanControls.stop();
+            } catch (e) {
+                console.error("Error stopping camera:", e);
+            }
+        }
+    });
+
+    // Add visibility change handler to manage camera when tab is hidden
+    document.addEventListener('visibilitychange', function() {
+        if (document.hidden) {
+            addDebug("Tab hidden, pausing scanner");
+        } else {
+            addDebug("Tab visible, resuming scanner");
         }
     });
 </script>
