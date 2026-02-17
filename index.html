@@ -5,14 +5,73 @@
     <title>Book Scanner</title>
     <script src="https://unpkg.com/@zxing/library@latest"></script>
     <style>
-        body { margin:0; font-family:sans-serif; background:black; color:white; text-align:center; }
-        video { width:100%; max-height: 70vh; background: #222; }
-        #overlay { position:absolute; top:35%; left:10%; width:80%; height:18%; border:4px solid lime; border-radius:12px; pointer-events:none; z-index: 10; }
-        #status { padding:15px; font-size:18px; font-weight: bold; background: #333; }
-        button { margin:5px; padding:12px; font-size:16px; border-radius: 8px; border: none; cursor: pointer; }
+        body { 
+            margin: 0; 
+            font-family: sans-serif; 
+            background: black; 
+            color: white; 
+            text-align: center; 
+        }
+        video { 
+            width: 100%; 
+            max-height: 70vh; 
+            background: #222; 
+        }
+        #overlay { 
+            position: absolute; 
+            top: 35%; 
+            left: 10%; 
+            width: 80%; 
+            height: 18%; 
+            border: 4px solid lime; 
+            border-radius: 12px; 
+            pointer-events: none; 
+            z-index: 10; 
+            transition: border-color 0.3s;
+        }
+        #status { 
+            padding: 15px; 
+            font-size: 18px; 
+            font-weight: bold; 
+            background: #333; 
+            min-height: 30px;
+        }
+        .status-error { background: #c0392b !important; }
+        .status-success { background: #27ae60 !important; }
+        
+        button { 
+            margin: 5px; 
+            padding: 12px 20px; 
+            font-size: 16px; 
+            border-radius: 8px; 
+            border: none; 
+            cursor: pointer; 
+            transition: opacity 0.2s;
+        }
+        button:active { opacity: 0.7; }
+        
         .btn-office { background: #3498db; color: white; }
         .btn-living { background: #e67e22; color: white; }
         .btn-storage { background: #95a5a6; color: white; }
+        .btn-active { box-shadow: 0 0 0 3px yellow; }
+        
+        #scanHistory { 
+            margin: 20px auto; 
+            max-width: 600px; 
+            text-align: left; 
+            padding: 10px;
+            font-size: 14px;
+        }
+        .history-item { 
+            padding: 8px; 
+            background: #222; 
+            margin: 5px 0; 
+            border-radius: 5px;
+            border-left: 4px solid #27ae60;
+        }
+        .history-item.error { border-left-color: #c0392b; }
+        
+        #controls { margin: 15px 0; }
     </style>
 </head>
 <body>
@@ -26,86 +85,314 @@
 
 <div id="status">Initializing...</div>
 
-<div style="margin-top: 10px;">
-    <button class="btn-office" onclick="setShelf('Office')">Office</button>
-    <button class="btn-living" onclick="setShelf('Living Room')">Living</button>
-    <button class="btn-storage" onclick="setShelf('Storage')">Storage</button>
+<div id="controls">
+    <div style="margin-bottom: 10px;">
+        <button class="btn-office btn-active" onclick="setShelf('Office')">Office</button>
+        <button class="btn-living" onclick="setShelf('Living Room')">Living Room</button>
+        <button class="btn-storage" onclick="setShelf('Storage')">Storage</button>
+    </div>
+    <div>
+        <button style="background: #e74c3c; color: white;" onclick="toggleScanning()">Stop Scanning</button>
+        <button style="background: #16a085; color: white;" onclick="clearHistory()">Clear History</button>
+    </div>
 </div>
 
+<div id="scanHistory"></div>
+
 <script>
+    // ===== CONFIGURATION =====
     const sheetURL = "https://script.google.com/macros/s/AKfycbyoZySH85-MXYKXySBDGsCg1PyxTp6LpIfptTB4HeLr6D7a__Z1jGrsQ8lVH8UTn0Hn/exec";
-    const SCAN_DELAY = 2500;
+    const SCAN_DELAY = 2500; // Milliseconds between duplicate scans
+    const MAX_HISTORY = 20; // Maximum history items to display
     
+    // ===== STATE =====
     let codeReader;
+    let scanControls;
     let lastScanTime = 0;
     let lastScan = "";
     let currentShelf = "Office";
+    let isScanning = true;
+    let scanHistory = [];
 
-    // 1. Wait for page to load
+    // ===== INITIALIZATION =====
     window.addEventListener('load', function() {
         codeReader = new ZXing.BrowserBarcodeReader();
         console.log("ZXing Ready");
+        loadHistory();
         initCamera();
     });
 
     function initCamera() {
         const statusEl = document.getElementById('status');
+        const videoEl = document.getElementById('video');
+        
+        // Check if browser supports getUserMedia
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            showError("Camera not supported in this browser");
+            return;
+        }
+        
+        statusEl.textContent = "Requesting camera access...";
         
         codeReader.listVideoInputDevices()
             .then((videoDevices) => {
-                // Find back camera
-                const backCam = videoDevices.find(device => /back|rear|environment/i.test(device.label));
+                if (videoDevices.length === 0) {
+                    showError("No camera found");
+                    return;
+                }
+                
+                console.log("Available cameras:", videoDevices);
+                
+                // Find back camera (prefer environment-facing)
+                const backCam = videoDevices.find(device => 
+                    /back|rear|environment/i.test(device.label)
+                );
                 const deviceId = backCam ? backCam.deviceId : videoDevices[0].deviceId;
                 
+                console.log("Using camera:", deviceId);
                 statusEl.textContent = "Align barcode in the box...";
                 
-                // 2. Start decoding
-                codeReader.decodeFromVideoDevice(deviceId, 'video', (result, err) => {
-                    if (result) {
+                // Start decoding
+                return codeReader.decodeFromVideoDevice(deviceId, 'video', (result, err) => {
+                    if (result && isScanning) {
                         handleBarcode(result.text);
+                    }
+                    if (err && !(err instanceof ZXing.NotFoundException)) {
+                        console.error("Decode error:", err);
                     }
                 });
             })
-            .catch(err => {
-                statusEl.textContent = "Error: " + err;
-                console.error(err);
-            });
-    }
-
-    function handleBarcode(isbn) {
-        const now = Date.now();
-        // Prevent duplicate scans within the delay period
-        if (isbn === lastScan && (now - lastScanTime) < SCAN_DELAY) return;
-
-        lastScan = isbn;
-        lastScanTime = now;
-
-        // Visual feedback
-        document.getElementById('status').textContent = "Scanned: " + isbn;
-        document.getElementById('overlay').style.borderColor = "orange";
-        
-        // Haptic feedback (vibrates on mobile if supported)
-        if (navigator.vibrate) navigator.vibrate(100);
-
-        // 3. Send to Google
-        const uploadUrl = `${sheetURL}?isbn=${isbn}&shelf=${encodeURIComponent(currentShelf)}`;
-        
-        fetch(uploadUrl, { mode: 'no-cors' })
-            .then(() => {
-                document.getElementById('status').textContent = `Saved ${isbn} to ${currentShelf}`;
-                setTimeout(() => {
-                    document.getElementById('overlay').style.borderColor = "lime";
-                }, 1000);
+            .then((controls) => {
+                scanControls = controls;
+                console.log("Scanning started");
             })
             .catch(err => {
-                document.getElementById('status').textContent = "Upload Failed!";
+                console.error("Camera error:", err);
+                if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+                    showError("Camera access denied. Please allow camera permissions and reload.");
+                } else if (err.name === 'NotFoundError') {
+                    showError("No camera found on this device");
+                } else if (err.name === 'NotReadableError') {
+                    showError("Camera is already in use by another application");
+                } else {
+                    showError("Camera error: " + err.message);
+                }
             });
     }
 
+    // ===== ISBN VALIDATION =====
+    function isValidISBN(code) {
+        // Remove hyphens and spaces
+        const cleaned = code.replace(/[-\s]/g, '');
+        
+        // Check if it's ISBN-10 (10 digits, last can be X) or ISBN-13 (13 digits)
+        const isbn10Pattern = /^\d{9}[\dX]$/;
+        const isbn13Pattern = /^(978|979)\d{10}$/;
+        
+        return isbn10Pattern.test(cleaned) || isbn13Pattern.test(cleaned);
+    }
+
+    // ===== BARCODE HANDLING =====
+    function handleBarcode(code) {
+        const now = Date.now();
+        
+        // Prevent duplicate scans within delay period
+        if (code === lastScan && (now - lastScanTime) < SCAN_DELAY) {
+            return;
+        }
+
+        lastScan = code;
+        lastScanTime = now;
+
+        // Validate ISBN
+        if (!isValidISBN(code)) {
+            showStatus(`Invalid ISBN: ${code}`, 'error');
+            flashOverlay('red');
+            return;
+        }
+
+        // Visual feedback
+        showStatus(`Scanning: ${code}...`, 'normal');
+        flashOverlay('orange');
+        
+        // Haptic feedback (mobile)
+        if (navigator.vibrate) {
+            navigator.vibrate(100);
+        }
+
+        // Send to Google Sheets
+        uploadToSheet(code);
+    }
+
+    // ===== UPLOAD TO GOOGLE SHEETS =====
+    function uploadToSheet(isbn) {
+        const timestamp = new Date().toISOString();
+        const uploadUrl = `${sheetURL}?isbn=${encodeURIComponent(isbn)}&shelf=${encodeURIComponent(currentShelf)}&timestamp=${encodeURIComponent(timestamp)}`;
+        
+        console.log("Uploading:", uploadUrl);
+        
+        fetch(uploadUrl, { 
+            mode: 'no-cors',
+            method: 'GET'
+        })
+            .then(() => {
+                // Note: no-cors mode means we can't read the response
+                // We'll assume success if no error is thrown
+                showStatus(`✓ Saved ${isbn} to ${currentShelf}`, 'success');
+                flashOverlay('lime');
+                addToHistory(isbn, currentShelf, true);
+                
+                // Also try to verify with a CORS-enabled request (will fail gracefully)
+                fetch(uploadUrl)
+                    .then(response => response.json())
+                    .then(data => {
+                        console.log("Upload confirmed:", data);
+                    })
+                    .catch(() => {
+                        // Expected to fail with CORS, but upload still worked
+                        console.log("CORS blocked (expected), but upload succeeded via no-cors");
+                    });
+            })
+            .catch(err => {
+                console.error("Upload error:", err);
+                showStatus(`✗ Upload failed for ${isbn}`, 'error');
+                flashOverlay('red');
+                addToHistory(isbn, currentShelf, false);
+            });
+    }
+
+    // ===== UI HELPERS =====
+    function showStatus(message, type = 'normal') {
+        const statusEl = document.getElementById('status');
+        statusEl.textContent = message;
+        statusEl.className = type === 'error' ? 'status-error' : type === 'success' ? 'status-success' : '';
+        
+        // Auto-clear success/error status after 3 seconds
+        if (type !== 'normal') {
+            setTimeout(() => {
+                if (statusEl.textContent === message) {
+                    statusEl.textContent = "Align barcode in the box...";
+                    statusEl.className = '';
+                }
+            }, 3000);
+        }
+    }
+
+    function showError(message) {
+        showStatus("ERROR: " + message, 'error');
+    }
+
+    function flashOverlay(color) {
+        const overlay = document.getElementById('overlay');
+        overlay.style.borderColor = color;
+        setTimeout(() => {
+            overlay.style.borderColor = 'lime';
+        }, 1000);
+    }
+
+    // ===== SHELF MANAGEMENT =====
     function setShelf(name) {
         currentShelf = name;
-        document.getElementById('status').textContent = "Shelf set to: " + name;
+        showStatus(`Shelf set to: ${name}`, 'normal');
+        
+        // Update button states
+        document.querySelectorAll('button[class*="btn-"]').forEach(btn => {
+            btn.classList.remove('btn-active');
+        });
+        event.target.classList.add('btn-active');
     }
+
+    // ===== SCANNING CONTROL =====
+    function toggleScanning() {
+        isScanning = !isScanning;
+        const btn = event.target;
+        
+        if (isScanning) {
+            btn.textContent = "Stop Scanning";
+            btn.style.background = "#e74c3c";
+            showStatus("Scanning resumed", 'normal');
+            if (!scanControls) {
+                initCamera();
+            }
+        } else {
+            btn.textContent = "Start Scanning";
+            btn.style.background = "#27ae60";
+            showStatus("Scanning paused", 'normal');
+        }
+    }
+
+    // ===== HISTORY MANAGEMENT =====
+    function addToHistory(isbn, shelf, success) {
+        const item = {
+            isbn: isbn,
+            shelf: shelf,
+            success: success,
+            timestamp: new Date().toLocaleTimeString()
+        };
+        
+        scanHistory.unshift(item);
+        
+        // Limit history size
+        if (scanHistory.length > MAX_HISTORY) {
+            scanHistory = scanHistory.slice(0, MAX_HISTORY);
+        }
+        
+        saveHistory();
+        renderHistory();
+    }
+
+    function renderHistory() {
+        const historyEl = document.getElementById('scanHistory');
+        
+        if (scanHistory.length === 0) {
+            historyEl.innerHTML = '';
+            return;
+        }
+        
+        historyEl.innerHTML = '<strong>Recent Scans:</strong>' + 
+            scanHistory.map(item => `
+                <div class="history-item ${item.success ? '' : 'error'}">
+                    ${item.success ? '✓' : '✗'} ${item.isbn} → ${item.shelf} 
+                    <span style="float:right; opacity:0.6">${item.timestamp}</span>
+                </div>
+            `).join('');
+    }
+
+    function clearHistory() {
+        if (confirm('Clear scan history?')) {
+            scanHistory = [];
+            saveHistory();
+            renderHistory();
+            showStatus('History cleared', 'normal');
+        }
+    }
+
+    function saveHistory() {
+        try {
+            localStorage.setItem('scanHistory', JSON.stringify(scanHistory));
+        } catch (e) {
+            console.error("Failed to save history:", e);
+        }
+    }
+
+    function loadHistory() {
+        try {
+            const saved = localStorage.getItem('scanHistory');
+            if (saved) {
+                scanHistory = JSON.parse(saved);
+                renderHistory();
+            }
+        } catch (e) {
+            console.error("Failed to load history:", e);
+        }
+    }
+
+    // ===== CLEANUP =====
+    window.addEventListener('beforeunload', function() {
+        if (scanControls) {
+            scanControls.stop();
+        }
+    });
 </script>
 
 </body>
